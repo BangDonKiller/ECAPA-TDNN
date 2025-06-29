@@ -4,6 +4,8 @@ DataLoader for training
 
 import glob, numpy, os, random, soundfile, torch
 from scipy import signal
+from pydub import AudioSegment
+import numpy as np
 
 class train_loader(object):
     def __init__(self, train_list, train_path, musan_path, rir_path, num_frames, **kwargs):
@@ -25,11 +27,11 @@ class train_loader(object):
 
         # 建立噪音資料清單
         self.noiselist = {}
-        augment_files = glob.glob(os.path.join(musan_path,'*/*/*/*.wav'))
+        augment_files = glob.glob(os.path.join(musan_path,'*/*/*.wav'))
         for file in augment_files:
-            if file.split('/')[-4] not in self.noiselist:
-                self.noiselist[file.split('/')[-4]] = []
-            self.noiselist[file.split('/')[-4]].append(file)
+            if file.split('\\')[-3] not in self.noiselist:
+                self.noiselist[file.split('\\')[-3]] = []
+            self.noiselist[file.split('\\')[-3]].append(file)
 
         # 讀取混響 RIR 檔案
         self.rir_files = glob.glob(os.path.join(rir_path,'*/*/*.wav'))
@@ -37,7 +39,7 @@ class train_loader(object):
         # 載入語音檔與對應標籤
         self.data_list = []
         self.data_label = []
-        lines = open(train_list).read().splitlines()
+        lines = open(train_list).read().splitlines()[:10000]  # 限制讀取前 500000 行
         dictkeys = list(set([x.split()[0] for x in lines]))  # 擷取所有說話者 ID
         dictkeys.sort()
         dictkeys = { key : ii for ii, key in enumerate(dictkeys) }
@@ -55,7 +57,14 @@ class train_loader(object):
         - 套用數據增強（原始、混響、噪音等）
         - 回傳語音 Tensor 和標籤
         """
-        audio, sr = soundfile.read(self.data_list[index])		
+        
+        # 因為抓下來的檔案是.m4a檔，因此造成soundfile不能直接讀取
+        path = self.data_list[index]
+        if path.lower().endswith('.m4a'):
+            audio, sr = self.load_m4a(path)
+        else:
+            audio, sr = soundfile.read(path)
+
         length = self.num_frames * 160 + 240
         if audio.shape[0] <= length:
             shortage = length - audio.shape[0]
@@ -69,8 +78,7 @@ class train_loader(object):
         if augtype == 0:   # 原始資料
             audio = audio
         elif augtype == 1: # 混響
-            pass
-            # audio = self.add_rev(audio)
+            audio = self.add_rev(audio)
         elif augtype == 2: # 語音型噪音（多人講話）
             audio = self.add_noise(audio, 'speech')
         elif augtype == 3: # 音樂噪音
@@ -97,7 +105,7 @@ class train_loader(object):
         """
         rir_file = random.choice(self.rir_files)
         rir, sr = soundfile.read(rir_file)
-        rir = numpy.expand_dims(rir.astype(numpy.float), 0)
+        rir = numpy.expand_dims(rir.astype(float), 0)
         rir = rir / numpy.sqrt(numpy.sum(rir**2))  # 正規化
         return signal.convolve(audio, rir, mode='full')[:, :self.num_frames * 160 + 240]
 
@@ -112,7 +120,7 @@ class train_loader(object):
         # 計算乾淨語音的平均功率 (DB)
         clean_db = 10 * numpy.log10(numpy.mean(audio ** 2) + 1e-4) 
         
-        # 決定噪音數量和選擇噪音檔案
+        # 決定加入的噪音數量和選擇噪音檔案
         numnoise = self.numnoise[noisecat]
         noiselist = random.sample(self.noiselist[noisecat], random.randint(numnoise[0], numnoise[1]))
         
@@ -126,7 +134,7 @@ class train_loader(object):
             # 加上前後各240個樣本的緩衝區，避免邊緣效應(猜測)
             length = self.num_frames * 160 + 240
             
-            # 如果噪音長度不足，則重複填充
+            # 如果噪音長度不足，則重複填充 (不一定每段噪音都有足夠長度可供使用)
             if noiseaudio.shape[0] <= length:
                 shortage = length - noiseaudio.shape[0]
                 noiseaudio = numpy.pad(noiseaudio, (0, shortage), 'wrap')
@@ -141,3 +149,10 @@ class train_loader(object):
             noises.append(numpy.sqrt(10 ** ((clean_db - noise_db - noisesnr) / 10)) * noiseaudio)
         noise = numpy.sum(numpy.concatenate(noises, axis=0), axis=0, keepdims=True)
         return noise + audio
+    
+    def load_m4a(self, path):
+        audio = AudioSegment.from_file(path, format='m4a')
+        samples = np.array(audio.get_array_of_samples(), dtype=np.float32)
+        if audio.channels == 2:
+            samples = samples.reshape(-1, 2).mean(axis=1)
+        return samples / (1 << (8*audio.sample_width - 1)), audio.frame_rate

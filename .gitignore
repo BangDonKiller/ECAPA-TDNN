@@ -2,3 +2,5 @@
 exps
 install packages
 dataset
+__pycache__/
+Tool
